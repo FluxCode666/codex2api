@@ -52,19 +52,27 @@
 - 测试要求
 - 文档更新
 
+### 7. 本地定制与升级指南 ([LOCAL_CUSTOMIZATION_UPGRADE.md](LOCAL_CUSTOMIZATION_UPGRADE.md))
+- 本地增强功能清单
+- 关键改动文件定位
+- 从 GitHub 增量升级时的保留策略
+- 升级后验证清单
+
 ## 快速开始
 
 1. **新用户**: 先阅读主 README.md，然后参考 [DEPLOYMENT.md](DEPLOYMENT.md) 进行部署
 2. **开发者**: 参考 [ARCHITECTURE.md](ARCHITECTURE.md) 了解架构，[CONTRIBUTING.md](CONTRIBUTING.md) 了解贡献规范
 3. **运维人员**: 重点参考 [CONFIGURATION.md](CONFIGURATION.md) 和 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
 4. **API 使用者**: 参考 [API.md](API.md) 了解所有接口
+5. **本地二次开发/长期维护**: 参考 [LOCAL_CUSTOMIZATION_UPGRADE.md](LOCAL_CUSTOMIZATION_UPGRADE.md)
 
 ## 文档更新记录
 
 | 日期 | 版本 | 更新内容 |
 |------|------|----------|
 | 2024-03-29 | v1.0 | 初始文档版本，包含 6 个核心文档 |
+| 2026-04-25 | v1.1 | 新增本地定制与增量升级指南 |
 
 ---
 
-*文档最后更新: 2024-03-29*
+*文档最后更新: 2026-04-25*

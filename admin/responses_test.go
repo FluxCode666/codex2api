@@ -143,9 +143,10 @@ func TestCreateAccountResponse(t *testing.T) {
 
 func TestCreateAPIKeyResponse(t *testing.T) {
 	resp := createAPIKeyResponse{
-		ID:   456,
-		Key:  "api-key-secret",
-		Name: "Test Key",
+		ID:           456,
+		Key:          "api-key-secret",
+		Name:         "Test Key",
+		PoolPlanType: "team",
 	}
 
 	if resp.ID != 456 {
@@ -153,6 +154,9 @@ func TestCreateAPIKeyResponse(t *testing.T) {
 	}
 	if resp.Key != "api-key-secret" {
 		t.Errorf("Key = %q, want 'api-key-secret'", resp.Key)
+	}
+	if resp.PoolPlanType != "team" {
+		t.Errorf("PoolPlanType = %q, want 'team'", resp.PoolPlanType)
 	}
 }
 

@@ -110,6 +110,7 @@ docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 | [架构文档](docs/ARCHITECTURE.md) | 系统架构、调度算法、存储设计 | `docs/ARCHITECTURE.md` |
 | [故障排查](docs/TROUBLESHOOTING.md) | 常见问题排查、诊断脚本、解决方案 | `docs/TROUBLESHOOTING.md` |
 | [贡献指南](docs/CONTRIBUTING.md) | 开发规范、PR 流程、代码标准 | `docs/CONTRIBUTING.md` |
+| [本地定制与升级指南](docs/LOCAL_CUSTOMIZATION_UPGRADE.md) | 记录本地增强功能、关键改动文件、后续增量升级保留方案 | `docs/LOCAL_CUSTOMIZATION_UPGRADE.md` |
 
 ---
 

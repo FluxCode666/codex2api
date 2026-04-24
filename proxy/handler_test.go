@@ -107,6 +107,38 @@ func TestAccountFilterForSparkRequiresPro(t *testing.T) {
 	}
 }
 
+func TestAccountFilterForAPIKeyPoolPlanType(t *testing.T) {
+	filter := accountFilterForAPIKeyPool("plus")
+	if filter == nil {
+		t.Fatal("expected filter for plus pool")
+	}
+	if !filter(&auth.Account{PlanType: "plus"}) {
+		t.Fatal("plus pool should allow plus accounts")
+	}
+	if filter(&auth.Account{PlanType: "pro"}) {
+		t.Fatal("plus pool should reject pro accounts")
+	}
+	if accountFilterForAPIKeyPool("all") != nil {
+		t.Fatal("all pool should not add account filter")
+	}
+}
+
+func TestCombineAccountFilters(t *testing.T) {
+	filter := combineAccountFilters(
+		accountFilterForModel("gpt-5.3-codex-spark"),
+		accountFilterForAPIKeyPool("pro"),
+	)
+	if filter == nil {
+		t.Fatal("expected combined filter")
+	}
+	if !filter(&auth.Account{PlanType: "pro"}) {
+		t.Fatal("combined filter should allow pro spark requests on pro pool")
+	}
+	if filter(&auth.Account{PlanType: "plus"}) {
+		t.Fatal("combined filter should reject plus account")
+	}
+}
+
 func TestSendFinalUpstreamError_UsageLimitRewrites429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -351,7 +383,7 @@ func TestAuthMiddlewareSetsAPIKeyContext(t *testing.T) {
 	defer db.Close()
 
 	key := "sk-test-auth-1234567890"
-	id, err := db.InsertAPIKey(context.Background(), "Team A", key)
+	id, err := db.InsertAPIKey(context.Background(), "Team A", key, "team")
 	if err != nil {
 		t.Fatalf("InsertAPIKey 返回错误: %v", err)
 	}
@@ -361,10 +393,11 @@ func TestAuthMiddlewareSetsAPIKeyContext(t *testing.T) {
 	router.Use(handler.authMiddleware())
 	router.GET("/ok", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"id":     c.MustGet(contextAPIKeyID),
-			"name":   c.MustGet(contextAPIKeyName),
-			"masked": c.MustGet(contextAPIKeyMasked),
-			"raw":    c.MustGet("apiKey"),
+			"id":             c.MustGet(contextAPIKeyID),
+			"name":           c.MustGet(contextAPIKeyName),
+			"masked":         c.MustGet(contextAPIKeyMasked),
+			"pool_plan_type": c.MustGet(contextAPIKeyPoolPlanType),
+			"raw":            c.MustGet("apiKey"),
 		})
 	})
 
@@ -379,10 +412,11 @@ func TestAuthMiddlewareSetsAPIKeyContext(t *testing.T) {
 	}
 
 	var payload struct {
-		ID     int64  `json:"id"`
-		Name   string `json:"name"`
-		Masked string `json:"masked"`
-		Raw    string `json:"raw"`
+		ID           int64  `json:"id"`
+		Name         string `json:"name"`
+		Masked       string `json:"masked"`
+		PoolPlanType string `json:"pool_plan_type"`
+		Raw          string `json:"raw"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("json.Unmarshal 返回错误: %v", err)
@@ -396,6 +430,9 @@ func TestAuthMiddlewareSetsAPIKeyContext(t *testing.T) {
 	}
 	if payload.Masked == "" || payload.Masked == key {
 		t.Fatalf("masked = %q, want masked value", payload.Masked)
+	}
+	if payload.PoolPlanType != "team" {
+		t.Fatalf("pool_plan_type = %q, want %q", payload.PoolPlanType, "team")
 	}
 	if payload.Raw != key {
 		t.Fatalf("raw = %q, want %q", payload.Raw, key)

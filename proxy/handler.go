@@ -82,9 +82,10 @@ type codex429Decision struct {
 }
 
 const (
-	contextAPIKeyID     = "apiKeyID"
-	contextAPIKeyName   = "apiKeyName"
-	contextAPIKeyMasked = "apiKeyMasked"
+	contextAPIKeyID           = "apiKeyID"
+	contextAPIKeyName         = "apiKeyName"
+	contextAPIKeyMasked       = "apiKeyMasked"
+	contextAPIKeyPoolPlanType = "apiKeyPoolPlanType"
 )
 
 func requestAPIKeyID(c *gin.Context) int64 {
@@ -110,6 +111,18 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 	return fmt.Sprintf("%s::api-key:%d", sessionID, apiKeyID)
 }
 
+func requestAPIKeyPoolPlanType(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if value, exists := c.Get(contextAPIKeyPoolPlanType); exists && value != nil {
+		if plan, ok := value.(string); ok {
+			return normalizeAPIKeyPoolPlanType(plan)
+		}
+	}
+	return ""
+}
+
 const proOnlySparkModel = "gpt-5.3-codex-spark"
 
 func isProOnlyModel(model string) bool {
@@ -125,6 +138,50 @@ func accountFilterForModel(model string) auth.AccountFilter {
 			return false
 		}
 		return strings.EqualFold(strings.TrimSpace(account.GetPlanType()), "pro")
+	}
+}
+
+func normalizeAPIKeyPoolPlanType(plan string) string {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "", "all":
+		return ""
+	case "free", "team", "plus", "pro":
+		return strings.ToLower(strings.TrimSpace(plan))
+	default:
+		return ""
+	}
+}
+
+func accountFilterForAPIKeyPool(plan string) auth.AccountFilter {
+	poolPlanType := normalizeAPIKeyPoolPlanType(plan)
+	if poolPlanType == "" {
+		return nil
+	}
+	return func(account *auth.Account) bool {
+		if account == nil {
+			return false
+		}
+		return strings.EqualFold(strings.TrimSpace(account.GetPlanType()), poolPlanType)
+	}
+}
+
+func combineAccountFilters(filters ...auth.AccountFilter) auth.AccountFilter {
+	active := make([]auth.AccountFilter, 0, len(filters))
+	for _, filter := range filters {
+		if filter != nil {
+			active = append(active, filter)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	return func(account *auth.Account) bool {
+		for _, filter := range active {
+			if !filter(account) {
+				return false
+			}
+		}
+		return true
 	}
 }
 
@@ -150,6 +207,8 @@ func noAvailableAnthropicAccountMessage(model string) string {
 	return "No available accounts, please retry later"
 }
 
+const dbKeyCacheTTL = 10 * time.Second
+
 // NewHandler 创建处理器
 func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCfg *DeviceProfileConfig) *Handler {
 	return &Handler{
@@ -166,10 +225,10 @@ func NewHandlerWithDeviceProfile(store *auth.Store, db *database.DB, deviceCfg *
 	return NewHandler(store, db, nil, deviceCfg)
 }
 
-// refreshDBKeys 从数据库刷新密钥缓存（5 分钟）
-func (h *Handler) refreshDBKeys() map[string]*database.APIKeyRow {
+// refreshDBKeys 从数据库刷新密钥缓存。
+func (h *Handler) refreshDBKeys(force bool) map[string]*database.APIKeyRow {
 	h.dbKeysMu.RLock()
-	if time.Now().Before(h.dbKeysUntil) {
+	if !force && time.Now().Before(h.dbKeysUntil) {
 		keys := h.dbKeys
 		h.dbKeysMu.RUnlock()
 		return keys
@@ -180,7 +239,7 @@ func (h *Handler) refreshDBKeys() map[string]*database.APIKeyRow {
 	defer h.dbKeysMu.Unlock()
 
 	// double check
-	if time.Now().Before(h.dbKeysUntil) {
+	if !force && time.Now().Before(h.dbKeysUntil) {
 		return h.dbKeys
 	}
 
@@ -200,7 +259,7 @@ func (h *Handler) refreshDBKeys() map[string]*database.APIKeyRow {
 		newMap[row.Key] = row
 	}
 	h.dbKeys = newMap
-	h.dbKeysUntil = time.Now().Add(5 * time.Minute)
+	h.dbKeysUntil = time.Now().Add(dbKeyCacheTTL)
 	return newMap
 }
 
@@ -212,8 +271,12 @@ func (h *Handler) resolveAPIKey(key string) (*database.APIKeyRow, bool) {
 			Key:  key,
 		}, true
 	}
-	dbKeys := h.refreshDBKeys()
+	dbKeys := h.refreshDBKeys(false)
 	row, ok := dbKeys[key]
+	if !ok {
+		dbKeys = h.refreshDBKeys(true)
+		row, ok = dbKeys[key]
+	}
 	return row, ok
 }
 
@@ -228,7 +291,11 @@ func (h *Handler) hasAnyKeys() bool {
 	if len(h.configKeys) > 0 {
 		return true
 	}
-	dbKeys := h.refreshDBKeys()
+	dbKeys := h.refreshDBKeys(false)
+	if len(dbKeys) > 0 {
+		return true
+	}
+	dbKeys = h.refreshDBKeys(true)
 	return len(dbKeys) > 0
 }
 
@@ -452,6 +519,7 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 		c.Set(contextAPIKeyID, apiKeyRow.ID)
 		c.Set(contextAPIKeyName, strings.TrimSpace(apiKeyRow.Name))
 		c.Set(contextAPIKeyMasked, security.MaskAPIKey(apiKeyRow.Key))
+		c.Set(contextAPIKeyPoolPlanType, normalizeAPIKeyPoolPlanType(apiKeyRow.PoolPlanType))
 		c.Set("apiKey", key)
 		c.Next()
 	}
@@ -549,7 +617,10 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 2. 准备上游请求体（Unmarshal→map→Marshal，一次序列化）
 	codexBody, expandedInputRaw := PrepareResponsesBody(rawBody)
 	effectiveModel := effectiveRequestModel(codexBody, model)
-	accountFilter := accountFilterForModel(effectiveModel)
+	accountFilter := combineAccountFilters(
+		accountFilterForModel(effectiveModel),
+		accountFilterForAPIKeyPool(requestAPIKeyPoolPlanType(c)),
+	)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -919,7 +990,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 准备上游请求体
 	codexBody, _ := PrepareCompactResponsesBody(rawBody)
 	effectiveModel := effectiveRequestModel(codexBody, model)
-	accountFilter := accountFilterForModel(effectiveModel)
+	accountFilter := combineAccountFilters(
+		accountFilterForModel(effectiveModel),
+		accountFilterForAPIKeyPool(requestAPIKeyPoolPlanType(c)),
+	)
 
 	// 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -1122,7 +1196,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 	effectiveModel := effectiveRequestModel(codexBody, model)
-	accountFilter := accountFilterForModel(effectiveModel)
+	accountFilter := combineAccountFilters(
+		accountFilterForModel(effectiveModel),
+		accountFilterForAPIKeyPool(requestAPIKeyPoolPlanType(c)),
+	)
 
 	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 	apiKeyID := requestAPIKeyID(c)

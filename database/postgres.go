@@ -281,8 +281,10 @@ func (db *DB) migrate(ctx context.Context) error {
 		id         SERIAL PRIMARY KEY,
 		name       VARCHAR(255) DEFAULT '',
 		key        VARCHAR(255) NOT NULL UNIQUE,
+		pool_plan_type VARCHAR(20) DEFAULT '',
 		created_at TIMESTAMPTZ DEFAULT NOW()
 	);
+	ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS pool_plan_type VARCHAR(20) DEFAULT '';
 
 			CREATE TABLE IF NOT EXISTS system_settings (
 				id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -393,15 +395,16 @@ func (db *DB) migrate(ctx context.Context) error {
 
 // APIKeyRow API 密钥行
 type APIKeyRow struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Key       string    `json:"key"`
-	CreatedAt time.Time `json:"created_at"`
+	ID           int64     `json:"id"`
+	Name         string    `json:"name"`
+	Key          string    `json:"key"`
+	PoolPlanType string    `json:"pool_plan_type"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // ListAPIKeys 获取所有 API 密钥
 func (db *DB) ListAPIKeys(ctx context.Context) ([]*APIKeyRow, error) {
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, name, key, created_at FROM api_keys ORDER BY id`)
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, name, key, COALESCE(pool_plan_type, ''), created_at FROM api_keys ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +414,7 @@ func (db *DB) ListAPIKeys(ctx context.Context) ([]*APIKeyRow, error) {
 	for rows.Next() {
 		k := &APIKeyRow{}
 		var createdAtRaw interface{}
-		if err := rows.Scan(&k.ID, &k.Name, &k.Key, &createdAtRaw); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.Key, &k.PoolPlanType, &createdAtRaw); err != nil {
 			return nil, err
 		}
 		k.CreatedAt, err = parseDBTimeValue(createdAtRaw)
@@ -424,11 +427,11 @@ func (db *DB) ListAPIKeys(ctx context.Context) ([]*APIKeyRow, error) {
 }
 
 // InsertAPIKey 插入新 API 密钥
-func (db *DB) InsertAPIKey(ctx context.Context, name, key string) (int64, error) {
+func (db *DB) InsertAPIKey(ctx context.Context, name, key, poolPlanType string) (int64, error) {
 	return db.insertRowID(ctx,
-		`INSERT INTO api_keys (name, key) VALUES ($1, $2) RETURNING id`,
-		`INSERT INTO api_keys (name, key) VALUES ($1, $2)`,
-		name, key,
+		`INSERT INTO api_keys (name, key, pool_plan_type) VALUES ($1, $2, $3) RETURNING id`,
+		`INSERT INTO api_keys (name, key, pool_plan_type) VALUES ($1, $2, $3)`,
+		name, key, poolPlanType,
 	)
 }
 

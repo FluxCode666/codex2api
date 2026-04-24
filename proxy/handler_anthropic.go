@@ -112,6 +112,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		return
 	}
 	accountFilter := accountFilterForModel(effectiveModel)
+	accountFilter = combineAccountFilters(accountFilter, accountFilterForAPIKeyPool(requestAPIKeyPoolPlanType(c)))
 
 	// 提取 reasoning effort（从翻译后的 codex body 中）
 	reasoningEffort := extractReasoningEffort(codexBody)

@@ -614,6 +614,63 @@ func TestUpdateAccountSchedulerUpdatesRuntimeOverrides(t *testing.T) {
 	}
 }
 
+func TestCreateAPIKeyStoresPoolPlanType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	handler := &Handler{db: db}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/keys", strings.NewReader(`{"name":"Pro Pool","pool_plan_type":"pro"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.CreateAPIKey(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	var payload createAPIKeyResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Name != "Pro Pool" {
+		t.Fatalf("name = %q, want %q", payload.Name, "Pro Pool")
+	}
+	if payload.PoolPlanType != "pro" {
+		t.Fatalf("pool_plan_type = %q, want %q", payload.PoolPlanType, "pro")
+	}
+
+	keys, err := db.ListAPIKeys(context.Background())
+	if err != nil {
+		t.Fatalf("ListAPIKeys: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("len(keys) = %d, want 1", len(keys))
+	}
+	if keys[0].PoolPlanType != "pro" {
+		t.Fatalf("stored pool_plan_type = %q, want %q", keys[0].PoolPlanType, "pro")
+	}
+}
+
+func TestCreateAPIKeyRejectsInvalidPoolPlanType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	handler := &Handler{db: db}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/keys", strings.NewReader(`{"name":"Bad Pool","pool_plan_type":"enterprise"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.CreateAPIKey(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	assertErrorMessage(t, recorder, "pool_plan_type 仅支持 all/free/team/plus/pro")
+}
+
 func newTestAdminDB(t *testing.T) *database.DB {
 	t.Helper()
 
@@ -643,7 +700,7 @@ func insertTestAccount(t *testing.T, db *database.DB) int64 {
 func insertTestAPIKey(t *testing.T, db *database.DB, name string) int64 {
 	t.Helper()
 
-	id, err := db.InsertAPIKey(context.Background(), name, fmt.Sprintf("sk-test-%s-1234567890", strings.ToLower(strings.ReplaceAll(name, " ", "-"))))
+	id, err := db.InsertAPIKey(context.Background(), name, fmt.Sprintf("sk-test-%s-1234567890", strings.ToLower(strings.ReplaceAll(name, " ", "-"))), "")
 	if err != nil {
 		t.Fatalf("insert api key: %v", err)
 	}

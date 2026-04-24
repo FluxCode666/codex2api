@@ -15,6 +15,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -39,6 +40,7 @@ export default function APIKeys() {
   const { t } = useTranslation()
   const [newKeyName, setNewKeyName] = useState('')
   const [newKeyValue, setNewKeyValue] = useState('')
+  const [newKeyPoolPlanType, setNewKeyPoolPlanType] = useState('all')
   const [createdKeyId, setCreatedKeyId] = useState<number | null>(null)
   const [visibleKeys, setVisibleKeys] = useState<Set<number>>(new Set())
   const [creating, setCreating] = useState(false)
@@ -62,14 +64,48 @@ export default function APIKeys() {
       .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())[0]
   }, [keys])
 
+  const poolPlanOptions = useMemo(
+    () => [
+      { value: 'all', label: t('apiKeys.poolAll') },
+      { value: 'free', label: t('apiKeys.poolFree') },
+      { value: 'team', label: t('apiKeys.poolTeam') },
+      { value: 'plus', label: t('apiKeys.poolPlus') },
+      { value: 'pro', label: t('apiKeys.poolPro') },
+    ],
+    [t],
+  )
+
+  const getPoolPlanLabel = useCallback(
+    (poolPlanType?: string) => {
+      switch (normalizePoolPlanType(poolPlanType)) {
+        case 'free':
+          return t('apiKeys.poolFree')
+        case 'team':
+          return t('apiKeys.poolTeam')
+        case 'plus':
+          return t('apiKeys.poolPlus')
+        case 'pro':
+          return t('apiKeys.poolPro')
+        default:
+          return t('apiKeys.poolAll')
+      }
+    },
+    [t],
+  )
+
   const handleCreateKey = async () => {
     setCreating(true)
     try {
-      const result = await api.createAPIKey(newKeyName.trim() || t('apiKeys.defaultName'), newKeyValue.trim() || undefined)
+      const result = await api.createAPIKey(
+        newKeyName.trim() || t('apiKeys.defaultName'),
+        newKeyValue.trim() || undefined,
+        newKeyPoolPlanType,
+      )
       setCreatedKeyId(result.id)
       setVisibleKeys((prev) => new Set(prev).add(result.id))
       setNewKeyName('')
       setNewKeyValue('')
+      setNewKeyPoolPlanType('all')
       showToast(t('apiKeys.keyCreateSuccess'))
       void reload()
     } catch (error) {
@@ -224,6 +260,16 @@ export default function APIKeys() {
                       }}
                     />
                   </div>
+                  <div>
+                    <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">{t('apiKeys.poolLabel')}</label>
+                    <Select
+                      value={newKeyPoolPlanType}
+                      onValueChange={setNewKeyPoolPlanType}
+                      options={poolPlanOptions}
+                      placeholder={t('apiKeys.poolPlaceholder')}
+                    />
+                    <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{t('apiKeys.poolHint')}</p>
+                  </div>
                   <Button onClick={() => void handleCreateKey()} disabled={creating} className="w-full">
                     <Plus className="size-3.5" />
                     {creating ? t('apiKeys.creating') : t('apiKeys.createKey')}
@@ -266,6 +312,7 @@ export default function APIKeys() {
                     <TableHeader>
                       <TableRow>
                         <TableHead>{t('common.name')}</TableHead>
+                        <TableHead>{t('apiKeys.poolColumn')}</TableHead>
                         <TableHead>{t('apiKeys.keyColumn')}</TableHead>
                         <TableHead>{t('common.createdAt')}</TableHead>
                         <TableHead className="text-right">{t('common.actions')}</TableHead>
@@ -288,6 +335,11 @@ export default function APIKeys() {
                                   </Badge>
                                 ) : null}
                               </div>
+                            </TableCell>
+                            <TableCell>
+                              <Badge className={poolPlanBadgeClassName(keyRow.pool_plan_type)}>
+                                {getPoolPlanLabel(keyRow.pool_plan_type)}
+                              </Badge>
                             </TableCell>
                             <TableCell>
                               <div className="flex min-w-[260px] items-center gap-2">
@@ -344,6 +396,33 @@ export default function APIKeys() {
       </>
     </StateShell>
   )
+}
+
+function normalizePoolPlanType(poolPlanType?: string): string {
+  switch ((poolPlanType || '').trim().toLowerCase()) {
+    case 'free':
+    case 'team':
+    case 'plus':
+    case 'pro':
+      return (poolPlanType || '').trim().toLowerCase()
+    default:
+      return 'all'
+  }
+}
+
+function poolPlanBadgeClassName(poolPlanType?: string): string {
+  switch (normalizePoolPlanType(poolPlanType)) {
+    case 'free':
+      return 'border-transparent bg-amber-100 text-amber-700'
+    case 'team':
+      return 'border-transparent bg-sky-100 text-sky-700'
+    case 'plus':
+      return 'border-transparent bg-emerald-100 text-emerald-700'
+    case 'pro':
+      return 'border-transparent bg-rose-100 text-rose-700'
+    default:
+      return 'border-transparent bg-muted text-muted-foreground'
+  }
 }
 
 function KeySummaryCard({
