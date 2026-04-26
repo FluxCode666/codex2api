@@ -24,9 +24,12 @@ export default function Dashboard() {
 
   // 仅加载轻量级统计数据（秒级响应）
   const loadDashboardStats = useCallback(async () => {
+    const statsPromise = api.getStats()
+    // 使用统计失败时允许仪表盘主体先加载，避免单个慢查询导致整页报错。
+    const usageStatsPromise = api.getUsageStats().catch(() => null)
     const [stats, usageStats] = await Promise.all([
-      api.getStats(),
-      api.getUsageStats(),
+      statsPromise,
+      usageStatsPromise,
     ])
     return { stats, usageStats }
   }, [])
@@ -84,7 +87,7 @@ export default function Dashboard() {
   const total = stats?.total ?? 0
   const available = stats?.available ?? 0
   const errorCount = stats?.error ?? 0
-  const todayRequests = stats?.today_requests ?? 0
+  const todayRequests = usageStats?.today_requests ?? stats?.today_requests ?? 0
 
   const icons: Record<string, ReactNode> = {
     total: <Users className="size-[22px]" />,

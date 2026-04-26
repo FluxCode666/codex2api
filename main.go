@@ -127,7 +127,7 @@ func main() {
 	// 4b. 应用数据库连接池设置
 	if settings.PgMaxConns > 0 {
 		db.SetMaxOpenConns(settings.PgMaxConns)
-		log.Printf("%s 连接池: max_conns=%d", cfg.Database.Label(), settings.PgMaxConns)
+		log.Printf("%s 连接池: max_conns=%d", cfg.Database.Label(), db.Stats().MaxOpenConnections)
 	}
 
 	// 4c. 初始化 Resin 粘性代理池

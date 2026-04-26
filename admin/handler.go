@@ -52,10 +52,16 @@ type Handler struct {
 	chartCacheMu   sync.RWMutex
 	chartCacheData map[string]*chartCacheEntry
 
+	// 使用统计缓存（5秒 TTL），避免 Dashboard / Usage / Ops 并发重复扫 usage_logs
+	usageStatsCacheMu        sync.RWMutex
+	usageStatsCache          *database.UsageStats
+	usageStatsCacheExpiresAt time.Time
+
 	// 账号请求统计缓存（30秒 TTL）
 	reqCountMu         sync.RWMutex
 	reqCountCache      map[int64]*database.AccountRequestCount
 	reqCountExpiresAt  time.Time
+	reqCountRefreshing atomic.Bool
 	importRefreshQueue chan int64
 }
 
@@ -69,6 +75,7 @@ const (
 	importRefreshWorkers    = 8
 	importRefreshQueueSize  = 10000
 	importTextFieldMaxBytes = 1 * 1024 * 1024
+	usageStatsCacheTTL      = 5 * time.Second
 )
 
 var errImportFileMissing = errors.New("import file missing")
@@ -116,6 +123,53 @@ func (h *Handler) startImportRefreshWorkers() {
 
 func maxImportFileSizeLabel() string {
 	return fmt.Sprintf("%dMB", maxImportFileSizeBytes/(1024*1024))
+}
+
+func cloneUsageStats(src *database.UsageStats) *database.UsageStats {
+	if src == nil {
+		return nil
+	}
+	cloned := *src
+	return &cloned
+}
+
+func (h *Handler) getCachedUsageStats(ctx context.Context) (*database.UsageStats, error) {
+	now := time.Now()
+
+	h.usageStatsCacheMu.RLock()
+	if h.usageStatsCache != nil && now.Before(h.usageStatsCacheExpiresAt) {
+		cached := cloneUsageStats(h.usageStatsCache)
+		h.usageStatsCacheMu.RUnlock()
+		return cached, nil
+	}
+	h.usageStatsCacheMu.RUnlock()
+
+	h.usageStatsCacheMu.Lock()
+	defer h.usageStatsCacheMu.Unlock()
+
+	if h.usageStatsCache != nil && now.Before(h.usageStatsCacheExpiresAt) {
+		return cloneUsageStats(h.usageStatsCache), nil
+	}
+
+	stats, err := h.db.GetUsageStats(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	h.usageStatsCache = cloneUsageStats(stats)
+	h.usageStatsCacheExpiresAt = time.Now().Add(usageStatsCacheTTL)
+
+	return cloneUsageStats(stats), nil
+}
+
+func (h *Handler) getCachedTodayRequests() int64 {
+	h.usageStatsCacheMu.RLock()
+	defer h.usageStatsCacheMu.RUnlock()
+
+	if h.usageStatsCache == nil || time.Now().After(h.usageStatsCacheExpiresAt) {
+		return 0
+	}
+	return h.usageStatsCache.TodayRequests
 }
 
 func (h *Handler) enqueueImportedAccountRefresh(accountID int64) {
@@ -369,35 +423,21 @@ func (h *Handler) hasConfiguredAdminSecret(ctx context.Context) bool {
 
 // GetStats 获取仪表盘统计
 func (h *Handler) GetStats(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	defer cancel()
-
-	accounts, err := h.db.ListActive(ctx)
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-
+	accounts := h.store.Accounts()
 	total := len(accounts)
 	available := h.store.AvailableCount()
 	errCount := 0
 	for _, acc := range accounts {
-		if acc.Status == "error" {
+		if acc != nil && acc.RuntimeStatus() == "error" {
 			errCount++
 		}
-	}
-
-	usageStats, _ := h.db.GetUsageStats(ctx)
-	todayReqs := int64(0)
-	if usageStats != nil {
-		todayReqs = usageStats.TodayRequests
 	}
 
 	c.JSON(http.StatusOK, statsResponse{
 		Total:         total,
 		Available:     available,
 		Error:         errCount,
-		TodayRequests: todayReqs,
+		TodayRequests: h.getCachedTodayRequests(),
 	})
 }
 
@@ -453,11 +493,13 @@ type schedulerBreakdownResponse struct {
 
 // ListAccounts 获取账号列表
 func (h *Handler) ListAccounts(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	timeout := 5 * time.Second
+	if h.db != nil && h.db.Driver() == "sqlite" {
+		// SQLite 账号量较大时，读取全量账号 + 解码 credentials 需要更长时间。
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	defer cancel()
-
-	h.store.TriggerUsageProbeAsync()
-	h.store.TriggerRecoveryProbeAsync()
 
 	rows, err := h.db.ListActive(ctx)
 	if err != nil {
@@ -561,6 +603,13 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, accountsResponse{Accounts: accounts})
+
+	// SQLite 采用单连接池，账号页又会并发拉取 /accounts 与 /keys。
+	// 在列表请求里触发批量探针会让后台写操作和前台读请求争抢同一连接，导致管理页超时。
+	if h.store != nil && h.db != nil && h.db.Driver() != "sqlite" {
+		h.store.TriggerUsageProbeAsync()
+		h.store.TriggerRecoveryProbeAsync()
+	}
 }
 
 type updateAccountSchedulerReq struct {
@@ -818,6 +867,18 @@ func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCou
 	}
 	h.reqCountMu.RUnlock()
 
+	if h.db != nil && h.db.Driver() == "sqlite" {
+		h.refreshRequestCountsCacheAsync()
+
+		h.reqCountMu.RLock()
+		cached := h.reqCountCache
+		h.reqCountMu.RUnlock()
+		if cached != nil {
+			return cached
+		}
+		return make(map[int64]*database.AccountRequestCount)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	counts, err := h.db.GetAccountRequestCounts(ctx)
@@ -832,6 +893,33 @@ func (h *Handler) getCachedRequestCounts() map[int64]*database.AccountRequestCou
 	h.reqCountMu.Unlock()
 
 	return counts
+}
+
+func (h *Handler) refreshRequestCountsCacheAsync() {
+	if h == nil || h.db == nil {
+		return
+	}
+	if !h.reqCountRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func() {
+		defer h.reqCountRefreshing.Store(false)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		counts, err := h.db.GetAccountRequestCounts(ctx)
+		if err != nil {
+			log.Printf("后台刷新账号请求统计失败: %v", err)
+			return
+		}
+
+		h.reqCountMu.Lock()
+		h.reqCountCache = counts
+		h.reqCountExpiresAt = time.Now().Add(30 * time.Second)
+		h.reqCountMu.Unlock()
+	}()
 }
 
 type addAccountReq struct {
@@ -1848,10 +1936,10 @@ func (h *Handler) GetHealth(c *gin.Context) {
 
 // GetUsageStats 获取使用统计
 func (h *Handler) GetUsageStats(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
-	stats, err := h.db.GetUsageStats(ctx)
+	stats, err := h.getCachedUsageStats(ctx)
 	if err != nil {
 		writeInternalError(c, err)
 		return

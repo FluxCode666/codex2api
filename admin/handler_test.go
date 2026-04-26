@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
@@ -669,6 +671,46 @@ func TestCreateAPIKeyRejectsInvalidPoolPlanType(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 	assertErrorMessage(t, recorder, "pool_plan_type 仅支持 all/free/team/plus/pro")
+}
+
+func TestListAccountsSkipsBackgroundProbesOnSQLite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	if _, err := db.InsertATAccount(context.Background(), "probe-account", "at_test", ""); err != nil {
+		t.Fatalf("insert AT account: %v", err)
+	}
+
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	if err := store.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	probeCalled := make(chan struct{}, 1)
+	store.SetUsageProbeFunc(func(context.Context, *auth.Account) error {
+		select {
+		case probeCalled <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+
+	handler := &Handler{db: db, store: store}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts", nil)
+
+	handler.ListAccounts(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	select {
+	case <-probeCalled:
+		t.Fatal("ListAccounts should not trigger background probes on sqlite")
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 func newTestAdminDB(t *testing.T) *database.DB {

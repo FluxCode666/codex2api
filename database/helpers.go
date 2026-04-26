@@ -10,12 +10,31 @@ import (
 	"time"
 )
 
+const (
+	defaultSQLiteMaxOpenConns = 8
+	minSQLiteMaxOpenConns     = 4
+	maxSQLiteMaxOpenConns     = 16
+)
+
 func normalizeDriver(driver string) string {
 	driver = strings.TrimSpace(strings.ToLower(driver))
 	if driver == "" {
 		return "postgres"
 	}
 	return driver
+}
+
+func sqliteMaxOpenConns(n int) int {
+	switch {
+	case n <= 0:
+		return defaultSQLiteMaxOpenConns
+	case n < minSQLiteMaxOpenConns:
+		return minSQLiteMaxOpenConns
+	case n > maxSQLiteMaxOpenConns:
+		return maxSQLiteMaxOpenConns
+	default:
+		return n
+	}
 }
 
 func parseDBTimeValue(value interface{}) (time.Time, error) {
@@ -288,9 +307,10 @@ func (db *DB) SetMaxOpenConns(n int) {
 		return
 	}
 	if db.isSQLite() {
-		// SQLite 单文件模式下保持单连接，避免写锁竞争。
-		db.conn.SetMaxOpenConns(1)
-		db.conn.SetMaxIdleConns(1)
+		// WAL 模式下允许少量并发连接，让读请求不再被单个写连接完全串行阻塞。
+		pooled := sqliteMaxOpenConns(n)
+		db.conn.SetMaxOpenConns(pooled)
+		db.conn.SetMaxIdleConns(pooled)
 		return
 	}
 	db.conn.SetMaxOpenConns(n)

@@ -122,8 +122,9 @@ func New(driver string, dsn string) (*DB, error) {
 
 	// ==================== 连接池优化 ====================
 	if driver == "sqlite" {
-		conn.SetMaxOpenConns(1)
-		conn.SetMaxIdleConns(1)
+		pooled := sqliteMaxOpenConns(0)
+		conn.SetMaxOpenConns(pooled)
+		conn.SetMaxIdleConns(pooled)
 	} else {
 		// 高并发场景：大量 RT 刷新 + 前端查询 + 使用日志写入 并行
 		conn.SetMaxOpenConns(100)                 // 增加最大打开连接数以处理更高并发
