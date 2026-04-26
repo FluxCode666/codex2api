@@ -2,9 +2,10 @@ import type { PropsWithChildren } from 'react'
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ADMIN_AUTH_REQUIRED_EVENT, getAdminKey, setAdminKey } from '../api'
-import logoImg from '../assets/logo.png'
 
 type AuthStatus = 'checking' | 'authenticated' | 'need_login'
+
+const logoImg = `${import.meta.env.BASE_URL}favicon.png`
 
 export default function AuthGate({ children }: PropsWithChildren) {
   const { t } = useTranslation()

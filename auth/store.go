@@ -28,6 +28,16 @@ const (
 	StatusError                         // 不可用（RT 失效等）
 )
 
+const (
+	PlatformOpenAI          = "openai"
+	AccountTypeOAuth        = "oauth"
+	AccountTypeAccessToken  = "access_token"
+	AccountTypeAPIKey       = "api_key"
+	AccountTypeOpenAIAPIKey = "openai_api_key"
+	OpenAICodexCLIUserAgent = "codex_cli_rs/1.0.0"
+	OpenAICodexCLIVersion   = "1.0.0"
+)
+
 // AccountHealthTier 账号健康层级（仅用于调度优先级，不直接暴露给外部 API）
 type AccountHealthTier string
 
@@ -42,6 +52,8 @@ const (
 type Account struct {
 	mu             sync.RWMutex
 	DBID           int64 // 数据库 ID
+	Platform       string
+	Type           string
 	RefreshToken   string
 	AccessToken    string
 	ExpiresAt      time.Time
@@ -764,6 +776,27 @@ func (a *Account) GetPlanType() string {
 	return a.PlanType
 }
 
+// GetPlatform 获取账号平台类型
+func (a *Account) GetPlatform() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Platform
+}
+
+// GetType 获取账号认证类型
+func (a *Account) GetType() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Type
+}
+
+// HasRefreshToken 检查账号是否带有 refresh token
+func (a *Account) HasRefreshToken() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return strings.TrimSpace(a.RefreshToken) != ""
+}
+
 // GetHealthTier 获取当前健康层级
 func (a *Account) GetHealthTier() string {
 	a.mu.RLock()
@@ -1460,6 +1493,8 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 
 		account := &Account{
 			DBID:         row.ID,
+			Platform:     strings.TrimSpace(row.Platform),
+			Type:         strings.TrimSpace(row.Type),
 			RefreshToken: rt,
 			ProxyURL:     strings.TrimSpace(row.ProxyURL),
 			HealthTier:   HealthTierWarm,

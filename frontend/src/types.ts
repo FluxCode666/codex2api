@@ -325,6 +325,7 @@ export interface APIKeyRow {
   name: string
   key: string
   raw_key: string
+  pool_plan_type: string
   created_at: ISODateString
 }
 
@@ -334,6 +335,7 @@ export interface CreateAPIKeyResponse {
   id: number
   key: string
   name: string
+  pool_plan_type: string
 }
 
 export type ApiListResponse<K extends string, T> = {

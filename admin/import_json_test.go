@@ -146,7 +146,10 @@ func TestImportAccountsJSONReturnsExistingNoTokenMessageForUnsupportedJSON(t *te
 	ctx.Request = req
 
 	handler := &Handler{}
-	handler.importAccountsJSON(ctx, "")
+	handler.importAccountsJSON(ctx, []importUpload{{
+		filename: "accounts.json",
+		data:     []byte(`{"accounts":[{"credentials":{}}]}`),
+	}}, "")
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -170,7 +173,10 @@ func TestImportAccountsJSONRejectsInvalidJSONFile(t *testing.T) {
 	ctx.Request = req
 
 	handler := &Handler{}
-	handler.importAccountsJSON(ctx, "")
+	handler.importAccountsJSON(ctx, []importUpload{{
+		filename: "broken.json",
+		data:     []byte(`{"accounts":[}`),
+	}}, "")
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)

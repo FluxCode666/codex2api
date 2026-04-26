@@ -177,17 +177,85 @@ func TestApplyCodexRequestHeadersUsesSessionIDWithoutConversationID(t *testing.T
 	if got := req.Header.Get("Conversation_id"); got != "" {
 		t.Fatalf("Conversation_id = %q, want empty", got)
 	}
-	if got := req.Header.Get("User-Agent"); got != cfg.UserAgent {
+	if got := req.Header.Get("User-Agent"); got != auth.OpenAICodexCLIUserAgent {
 		t.Fatalf("User-Agent = %q", got)
 	}
-	if got := req.Header.Get("Version"); got != "0.120.0" {
+	if got := req.Header.Get("Version"); got != auth.OpenAICodexCLIVersion {
 		t.Fatalf("Version = %q", got)
 	}
-	if got := req.Header.Get("Originator"); got != "custom-originator" {
+	if got := req.Header.Get("X-Stainless-Package-Version"); got != auth.OpenAICodexCLIVersion {
+		t.Fatalf("X-Stainless-Package-Version = %q", got)
+	}
+	if got := req.Header.Get("X-Stainless-Runtime-Version"); got != auth.OpenAICodexCLIVersion {
+		t.Fatalf("X-Stainless-Runtime-Version = %q", got)
+	}
+	if got := req.Header.Get("Originator"); got != Originator {
 		t.Fatalf("Originator = %q", got)
 	}
 	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-42" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
+	}
+}
+
+func TestApplyCodexRequestHeadersUsesConfiguredUserAgentWithoutStabilization(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	acc := &auth.Account{
+		DBID:      7,
+		AccountID: "acct-7",
+		Type:      auth.AccountTypeAccessToken,
+	}
+	cfg := &DeviceProfileConfig{
+		UserAgent:      "codex-tui/0.124.0 (Mac OS 26.4.1; arm64) Apple_Terminal/470 (codex-tui; 0.124.0)",
+		PackageVersion: "0.124.0",
+	}
+	downstreamHeaders := http.Header{
+		"User-Agent": []string{"codex_cli_rs/0.130.0 (Mac OS 15.5.0; arm64) Apple_Terminal/464"},
+	}
+
+	applyCodexRequestHeaders(req, acc, "token-123", "", "", cfg, downstreamHeaders)
+
+	if got := req.Header.Get("User-Agent"); got != cfg.UserAgent {
+		t.Fatalf("User-Agent = %q", got)
+	}
+	if got := req.Header.Get("Version"); got != "0.124.0" {
+		t.Fatalf("Version = %q", got)
+	}
+}
+
+func TestApplyCodexRequestHeadersForcesCodexCLIForOAuthAccount(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	acc := &auth.Account{
+		DBID:         8,
+		Platform:     auth.PlatformOpenAI,
+		Type:         auth.AccountTypeOAuth,
+		RefreshToken: "rt-123",
+	}
+	cfg := &DeviceProfileConfig{
+		UserAgent:      "codex-tui/0.124.0",
+		PackageVersion: "0.124.0",
+		RuntimeVersion: "0.124.0",
+		OS:             "MacOS",
+		Arch:           "arm64",
+	}
+
+	applyCodexRequestHeaders(req, acc, "token-123", "", "", cfg, nil)
+
+	if got := req.Header.Get("User-Agent"); got != auth.OpenAICodexCLIUserAgent {
+		t.Fatalf("User-Agent = %q", got)
+	}
+	if got := req.Header.Get("Version"); got != auth.OpenAICodexCLIVersion {
+		t.Fatalf("Version = %q", got)
+	}
+	if got := req.Header.Get("Originator"); got != Originator {
+		t.Fatalf("Originator = %q", got)
 	}
 }
 

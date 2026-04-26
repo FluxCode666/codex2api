@@ -20,7 +20,7 @@ const (
 	AllowedEndpointPattern = `^[a-zA-Z0-9/_-]+$`
 )
 
-const DefaultMaxRequestBodySize = 32 * 1024 * 1024 // 32MB
+const DefaultMaxRequestBodySize = 256 * 1024 * 1024 // 256MB
 
 var MaxRequestBodySize = DefaultMaxRequestBodySize
 

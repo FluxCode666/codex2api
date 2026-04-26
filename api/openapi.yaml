@@ -13,7 +13,7 @@ info:
     - Streaming and non-streaming chat completions
     - Function calling support
     - Tool calling support
-  version: 1.0.0
+  version: 1.0.1-beta2
   contact:
     name: API Support
     url: https://github.com/codex2api

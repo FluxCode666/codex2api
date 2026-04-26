@@ -1,12 +1,10 @@
-# syntax=docker/dockerfile:1
-
 # ============================================================
 # Stage 1: 构建前端 (React + Vite)
 # 前端产物是纯静态文件，只需构建一次，与目标平台无关
 # ============================================================
-FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM docker.m.daocloud.io/library/node:20-alpine AS frontend-builder
 
-ARG BUILD_VERSION=dev
+ARG BUILD_VERSION=1.0.1-beta2
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
@@ -19,7 +17,7 @@ RUN VITE_APP_VERSION=${BUILD_VERSION} npm run build
 # Stage 2: 构建 Go 后端
 # 使用 BUILDPLATFORM 原生运行 + TARGETARCH 交叉编译
 # ============================================================
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM docker.m.daocloud.io/library/golang:1.25-alpine AS go-builder
 
 ARG TARGETARCH
 
@@ -38,7 +36,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # ============================================================
 # Stage 3: 最终运行镜像
 # ============================================================
-FROM alpine:3.19
+FROM docker.m.daocloud.io/library/alpine:3.19
 
 RUN apk --no-cache add ca-certificates tzdata
 

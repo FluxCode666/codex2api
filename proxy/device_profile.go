@@ -43,6 +43,16 @@ type DeviceProfileConfig struct {
 	BetaFeatures           string
 }
 
+// UpstreamClientIdentity 表示真正发往上游时使用的客户端身份。
+type UpstreamClientIdentity struct {
+	UserAgent      string
+	Version        string
+	PackageVersion string
+	RuntimeVersion string
+	OS             string
+	Arch           string
+}
+
 // CLIVersion 表示 Codex CLI 版本
 type cliVersion struct {
 	major int
@@ -113,6 +123,106 @@ func DeviceProfileConfigFromEnv(lookup func(string) string) *DeviceProfileConfig
 		StabilizeDeviceProfile: strings.EqualFold(trimmed("STABILIZE_DEVICE_PROFILE"), "true"),
 		BetaFeatures:           trimmed("CODEX_BETA_FEATURES"),
 	}
+}
+
+// ConfiguredClientProfile returns the explicitly configured upstream identity.
+// When CODEX_USER_AGENT is set, it takes precedence over randomized account profiles.
+func ConfiguredClientProfile(cfg *DeviceProfileConfig) (ClientProfile, bool) {
+	if cfg == nil || strings.TrimSpace(cfg.UserAgent) == "" {
+		return ClientProfile{}, false
+	}
+
+	profile := defaultDeviceProfile(cfg)
+	version := strings.TrimSpace(profile.PackageVersion)
+	if version == "" {
+		version = codexVersionFromProfile(profile, "")
+	}
+
+	return ClientProfile{
+		UserAgent: profile.UserAgent,
+		Version:   version,
+	}, true
+}
+
+// ResolveUpstreamClientIdentity 统一解析真实发往上游时的客户端身份。
+func ResolveUpstreamClientIdentity(account *auth.Account, apiKey string, headers http.Header, cfg *DeviceProfileConfig) UpstreamClientIdentity {
+	if shouldForceOpenAICodexClientIdentity(account, apiKey) {
+		return upstreamIdentityFromDeviceProfile(forcedOpenAICodexProfile(cfg), true)
+	}
+
+	if configuredProfile, ok := ConfiguredClientProfile(cfg); ok {
+		return UpstreamClientIdentity{
+			UserAgent: configuredProfile.UserAgent,
+			Version:   strings.TrimSpace(configuredProfile.Version),
+		}
+	}
+
+	if IsDeviceProfileStabilizationEnabled(cfg) {
+		return upstreamIdentityFromDeviceProfile(ResolveDeviceProfile(account, apiKey, headers, cfg), true)
+	}
+
+	accountID := int64(0)
+	if account != nil {
+		accountID = account.ID()
+	}
+	profile := ProfileForAccount(accountID)
+	return UpstreamClientIdentity{
+		UserAgent: profile.UserAgent,
+		Version:   strings.TrimSpace(profile.Version),
+	}
+}
+
+func shouldForceOpenAICodexClientIdentity(account *auth.Account, apiKey string) bool {
+	if strings.TrimSpace(apiKey) != "" {
+		return true
+	}
+	if account == nil {
+		return false
+	}
+
+	platform := strings.ToLower(strings.TrimSpace(account.GetPlatform()))
+	if platform != "" && platform != auth.PlatformOpenAI {
+		return false
+	}
+
+	accountType := strings.ToLower(strings.TrimSpace(account.GetType()))
+	switch accountType {
+	case auth.AccountTypeOpenAIAPIKey, auth.AccountTypeAPIKey:
+		return true
+	case auth.AccountTypeOAuth, "":
+		return account.HasRefreshToken()
+	default:
+		return false
+	}
+}
+
+func forcedOpenAICodexProfile(cfg *DeviceProfileConfig) deviceProfile {
+	profile := defaultDeviceProfile(cfg)
+	profile.UserAgent = auth.OpenAICodexCLIUserAgent
+	profile.PackageVersion = auth.OpenAICodexCLIVersion
+	profile.RuntimeVersion = auth.OpenAICodexCLIVersion
+	if version, ok := parseCodexCLIVersion(profile.UserAgent); ok {
+		profile.Version = version
+		profile.HasVersion = true
+	} else {
+		profile.Version = cliVersion{major: 1, minor: 0, patch: 0}
+		profile.HasVersion = true
+	}
+	return profile
+}
+
+func upstreamIdentityFromDeviceProfile(profile deviceProfile, includeStainless bool) UpstreamClientIdentity {
+	identity := UpstreamClientIdentity{
+		UserAgent: strings.TrimSpace(profile.UserAgent),
+		Version:   strings.TrimSpace(codexVersionFromProfile(profile, strings.TrimSpace(profile.PackageVersion))),
+	}
+	if includeStainless {
+		identity.PackageVersion = strings.TrimSpace(profile.PackageVersion)
+		identity.RuntimeVersion = strings.TrimSpace(profile.RuntimeVersion)
+		identity.OS = strings.TrimSpace(profile.OS)
+		identity.Arch = strings.TrimSpace(profile.Arch)
+	}
+	return identity
 }
 
 func defaultDeviceProfile(cfg *DeviceProfileConfig) deviceProfile {

@@ -18,16 +18,145 @@ import (
 	xproxy "golang.org/x/net/proxy"
 )
 
-// ==================== utls RoundTripper（Chrome 指纹 + HTTP/2） ====================
+// ==================== utls RoundTripper（Node.js 24.x 指纹 + HTTP/2） ====================
 //
 // 设计要点：
-//   - 使用 HelloChrome_Auto 模拟 Chrome 浏览器的 TLS 指纹
+//   - 使用精确的 Node.js 24.x TLS 指纹（JA3: 44f88fca027f27bab4bb08d4af15f23e）
+//   - 模拟真实 Codex CLI（基于 Node.js）的 TLS ClientHello，绕过 TLS 指纹检测
 //   - 支持 HTTP/2 协议（与 OpenAI/Anthropic API 兼容）
 //   - 连接池 + pending 管理：防止同一 host 重复创建连接
 //   - 代理支持：HTTP(S) 和 SOCKS5
 
+// Node.js 24.x TLS 指纹参数（从真实 Claude Code/Codex CLI 抓包获取）
+// JA3 Hash: 44f88fca027f27bab4bb08d4af15f23e
+// JA4:      t13d1714h1_5b57614c22b0_7baf387fc6ff
+var (
+	// nodejs24CipherSuites 包含 Node.js 24.x 的 17 个 cipher suites（顺序关键）
+	nodejs24CipherSuites = []uint16{
+		// TLS 1.3 cipher suites
+		0x1301, // TLS_AES_128_GCM_SHA256
+		0x1302, // TLS_AES_256_GCM_SHA384
+		0x1303, // TLS_CHACHA20_POLY1305_SHA256
+
+		// ECDHE + AES-GCM
+		0xc02b, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+		0xc02f, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+		0xc02c, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+		0xc030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+
+		// ECDHE + ChaCha20-Poly1305
+		0xcca9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+		0xcca8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+
+		// ECDHE + AES-CBC-SHA (legacy fallback)
+		0xc009, // TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+		0xc013, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+		0xc00a, // TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+		0xc014, // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+
+		// RSA + AES-GCM (non-PFS)
+		0x009c, // TLS_RSA_WITH_AES_128_GCM_SHA256
+		0x009d, // TLS_RSA_WITH_AES_256_GCM_SHA384
+
+		// RSA + AES-CBC-SHA (non-PFS, legacy)
+		0x002f, // TLS_RSA_WITH_AES_128_CBC_SHA
+		0x0035, // TLS_RSA_WITH_AES_256_CBC_SHA
+	}
+
+	// nodejs24Curves 包含 Node.js 24.x 的 3 个 supported groups
+	nodejs24Curves = []utls.CurveID{
+		utls.X25519,    // 0x001d
+		utls.CurveP256, // 0x0017 (secp256r1)
+		utls.CurveP384, // 0x0018 (secp384r1)
+	}
+
+	// nodejs24SignatureAlgorithms 包含 Node.js 24.x 的 9 个签名算法
+	nodejs24SignatureAlgorithms = []utls.SignatureScheme{
+		0x0403, // ecdsa_secp256r1_sha256
+		0x0804, // rsa_pss_rsae_sha256
+		0x0401, // rsa_pkcs1_sha256
+		0x0503, // ecdsa_secp384r1_sha384
+		0x0805, // rsa_pss_rsae_sha384
+		0x0501, // rsa_pkcs1_sha384
+		0x0806, // rsa_pss_rsae_sha512
+		0x0601, // rsa_pkcs1_sha512
+		0x0201, // rsa_pkcs1_sha1
+	}
+
+	// nodejs24ExtensionOrder 是 Node.js 24.x 的 TLS 扩展顺序（顺序关键，影响 JA3/JA4）
+	nodejs24ExtensionOrder = []uint16{
+		0,     // server_name
+		65037, // encrypted_client_hello (GREASE ECH)
+		23,    // extended_master_secret
+		65281, // renegotiation_info
+		10,    // supported_groups
+		11,    // ec_point_formats
+		35,    // session_ticket
+		16,    // alpn
+		5,     // status_request
+		13,    // signature_algorithms
+		18,    // signed_certificate_timestamp
+		51,    // key_share
+		45,    // psk_key_exchange_modes
+		43,    // supported_versions
+	}
+
+	// Node.js / Codex CLI 会通过 ALPN 优先协商 HTTP/2，并在必要时回退到 HTTP/1.1。
+	// 这里必须显式带上 h2；否则后续把连接交给 http2.ClientConn 时会把 HTTP/1.1 响应误判成 h2 frame。
+	nodejs24ALPNProtocols = []string{"h2", "http/1.1"}
+)
+
+// buildNodeJS24ClientHelloSpec 构建精确的 Node.js 24.x TLS ClientHello 规格
+// 用于替代 HelloChrome_Auto，精确模拟 Codex CLI 的 TLS 指纹
+func buildNodeJS24ClientHelloSpec() *utls.ClientHelloSpec {
+	extensions := make([]utls.TLSExtension, 0, len(nodejs24ExtensionOrder)+1)
+	for _, id := range nodejs24ExtensionOrder {
+		switch id {
+		case 0: // server_name
+			extensions = append(extensions, &utls.SNIExtension{})
+		case 5: // status_request (OCSP)
+			extensions = append(extensions, &utls.StatusRequestExtension{})
+		case 10: // supported_groups
+			extensions = append(extensions, &utls.SupportedCurvesExtension{Curves: nodejs24Curves})
+		case 11: // ec_point_formats
+			extensions = append(extensions, &utls.SupportedPointsExtension{SupportedPoints: []uint8{0}}) // uncompressed
+		case 13: // signature_algorithms
+			extensions = append(extensions, &utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: nodejs24SignatureAlgorithms})
+		case 16: // alpn
+			extensions = append(extensions, &utls.ALPNExtension{AlpnProtocols: append([]string(nil), nodejs24ALPNProtocols...)})
+		case 18: // signed_certificate_timestamp
+			extensions = append(extensions, &utls.SCTExtension{})
+		case 23: // extended_master_secret
+			extensions = append(extensions, &utls.ExtendedMasterSecretExtension{})
+		case 35: // session_ticket
+			extensions = append(extensions, &utls.SessionTicketExtension{})
+		case 43: // supported_versions
+			extensions = append(extensions, &utls.SupportedVersionsExtension{Versions: []uint16{utls.VersionTLS13, utls.VersionTLS12}})
+		case 45: // psk_key_exchange_modes
+			extensions = append(extensions, &utls.PSKKeyExchangeModesExtension{Modes: []uint8{uint8(utls.PskModeDHE)}})
+		case 51: // key_share
+			extensions = append(extensions, &utls.KeyShareExtension{KeyShares: []utls.KeyShare{{Group: utls.X25519}}})
+		case 0xfe0d: // encrypted_client_hello (65037)
+			// 发送 GREASE ECH，模拟 Node.js 行为（无真实 ECHConfig 时发随机 payload）
+			extensions = append(extensions, &utls.GREASEEncryptedClientHelloExtension{})
+		case 0xff01: // renegotiation_info (65281)
+			extensions = append(extensions, &utls.RenegotiationInfoExtension{})
+		default:
+			extensions = append(extensions, &utls.GenericExtension{Id: id})
+		}
+	}
+
+	return &utls.ClientHelloSpec{
+		CipherSuites:       nodejs24CipherSuites,
+		CompressionMethods: []uint8{0}, // null compression only
+		Extensions:         extensions,
+		TLSVersMax:         utls.VersionTLS13,
+		TLSVersMin:         utls.VersionTLS10,
+	}
+}
+
 // utlsRoundTripper 实现 http.RoundTripper 接口
-// 使用 utls 模拟 Chrome 浏览器的 TLS 指纹以绕过 TLS 指纹检测
+// 使用 utls 模拟 Node.js 24.x（Codex CLI）的 TLS 指纹以绕过 TLS 指纹检测
 type utlsRoundTripper struct {
 	mu         sync.Mutex
 	connections map[string]*http2.ClientConn // HTTP/2 连接池，按 host 索引
@@ -35,7 +164,7 @@ type utlsRoundTripper struct {
 	dialer     xproxy.Dialer                 // 底层拨号器（支持代理）
 }
 
-// NewUTLSTransport 创建使用 Chrome TLS 指纹的 RoundTripper
+// NewUTLSTransport 创建使用 Node.js 24.x TLS 指纹的 RoundTripper
 // 支持 HTTP(S) 和 SOCKS5 代理
 func NewUTLSTransport(proxyURL string) http.RoundTripper {
 	var dialer xproxy.Dialer = xproxy.Direct
@@ -57,7 +186,7 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 	}
 }
 
-// NewUTLSHttpClient 创建使用 Chrome TLS 指纹的 HTTP 客户端
+// NewUTLSHttpClient 创建使用 Node.js 24.x TLS 指纹的 HTTP 客户端
 func NewUTLSHttpClient(proxyURL string) *http.Client {
 	return &http.Client{
 		Transport: NewUTLSTransport(proxyURL),
@@ -235,7 +364,8 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 }
 
 // createConnection 创建新的 HTTP/2 连接
-// 使用 utls 的 HelloChrome_Auto 模拟 Chrome 浏览器的 TLS 指纹
+// 使用精确的 Node.js 24.x TLS 指纹（JA3: 44f88fca027f27bab4bb08d4af15f23e）
+// 模拟真实 Codex CLI 的 TLS 握手特征，绕过 TLS 指纹检测
 func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
 	// 1. 建立 TCP 连接（通过代理或直连）
 	conn, err := t.dialer.Dial("tcp", addr)
@@ -243,15 +373,20 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, fmt.Errorf("TCP 连接失败: %w", err)
 	}
 
-	// 2. 配置 TLS
+	// 2. 配置 TLS（使用 HelloCustom 以应用精确的 Node.js 24.x 指纹）
 	tlsConfig := &utls.Config{
 		ServerName: host,
 	}
+	tlsConn := utls.UClient(conn, tlsConfig, utls.HelloCustom)
 
-	// 3. 使用 utls 握手（Chrome 指纹）
-	tlsConn := utls.UClient(conn, tlsConfig, utls.HelloChrome_Auto)
+	// 3. 应用 Node.js 24.x ClientHello 规格（精确指纹伪装）
+	spec := buildNodeJS24ClientHelloSpec()
+	if err := tlsConn.ApplyPreset(spec); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("应用 TLS 指纹失败: %w", err)
+	}
 
-	// 设置握手超时
+	// 4. 执行 TLS 握手（设置超时）
 	handshakeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -260,7 +395,14 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, fmt.Errorf("TLS 握手失败: %w", err)
 	}
 
-	// 4. 创建 HTTP/2 连接
+	// 只有在 ALPN 成功协商到 h2 时，才能把这条连接交给 http2.ClientConn。
+	// 否则 x/net/http2 会把 HTTP/1.1 状态行当成 frame header，报 "frame too large"。
+	if negotiated := tlsConn.ConnectionState().NegotiatedProtocol; negotiated != http2.NextProtoTLS {
+		tlsConn.Close()
+		return nil, fmt.Errorf("ALPN 协商结果异常: negotiated=%q expected=%q", negotiated, http2.NextProtoTLS)
+	}
+
+	// 5. 创建 HTTP/2 连接
 	tr := &http2.Transport{}
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
@@ -323,7 +465,7 @@ type uTLSHTTPClientWrapper struct {
 	transport *utlsRoundTripper
 }
 
-// NewUTLSClient 创建使用 Chrome TLS 指纹的 HTTP 客户端
+// NewUTLSClient 创建使用 Node.js 24.x TLS 指纹的 HTTP 客户端
 // 返回包装后的客户端，支持 CloseIdleConnections
 func NewUTLSClient(proxyURL string) *uTLSHTTPClientWrapper {
 	rt := NewUTLSTransport(proxyURL).(*utlsRoundTripper)
@@ -341,4 +483,3 @@ func (c *uTLSHTTPClientWrapper) Do(req *http.Request) (*http.Response, error) {
 func (c *uTLSHTTPClientWrapper) CloseIdleConnections() {
 	c.transport.CloseIdleConnections()
 }
-

@@ -264,6 +264,8 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 
 	newAcc := &auth.Account{
 		DBID:         id,
+		Platform:     auth.PlatformOpenAI,
+		Type:         auth.AccountTypeOAuth,
 		RefreshToken: tokenResp.RefreshToken,
 		ProxyURL:     proxyURL,
 	}
@@ -326,8 +328,7 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 		return nil, nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-cli/0.91.0")
+	auth.ApplyOpenAIAuthHeaders(req)
 
 	// Resin 反代：注入临时账号身份头
 	if proxy.IsResinEnabled() && tempID != "" {
@@ -436,6 +437,8 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 
 	newAcc := &auth.Account{
 		DBID:         id,
+		Platform:     auth.PlatformOpenAI,
+		Type:         auth.AccountTypeOAuth,
 		RefreshToken: tokenResp.RefreshToken,
 		ProxyURL:     sess.ProxyURL,
 	}
@@ -529,4 +532,3 @@ p{color:#4a5568;line-height:1.6;margin:0}
 <body><div class="card"><div class="icon">%s</div><h1>%s</h1><p>%s</p></div></body></html>`,
 		title, color, icon, title, message)
 }
-

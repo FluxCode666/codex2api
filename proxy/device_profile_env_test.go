@@ -49,3 +49,19 @@ func TestDeviceProfileConfigFromEnv(t *testing.T) {
 		t.Fatalf("BetaFeatures = %q", cfg.BetaFeatures)
 	}
 }
+
+func TestConfiguredClientProfileUsesConfiguredUserAgent(t *testing.T) {
+	profile, ok := ConfiguredClientProfile(&DeviceProfileConfig{
+		UserAgent:      "codex-tui/0.124.0 (Mac OS 26.4.1; arm64) Apple_Terminal/470 (codex-tui; 0.124.0)",
+		PackageVersion: "0.124.0",
+	})
+	if !ok {
+		t.Fatal("expected configured profile")
+	}
+	if profile.UserAgent != "codex-tui/0.124.0 (Mac OS 26.4.1; arm64) Apple_Terminal/470 (codex-tui; 0.124.0)" {
+		t.Fatalf("UserAgent = %q", profile.UserAgent)
+	}
+	if profile.Version != "0.124.0" {
+		t.Fatalf("Version = %q", profile.Version)
+	}
+}

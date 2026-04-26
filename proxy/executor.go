@@ -295,6 +295,51 @@ func codexVersionFromProfile(profile deviceProfile, fallback string) string {
 	return strings.TrimSpace(fallback)
 }
 
+// codexWireHeaders 定义 Codex CLI 上游请求头的精确大小写（基于真实抓包）。
+// Go 的 http.Header 会将 key 规范化为 Canonical 形式，此 map 用于还原真实 wire format。
+// 来源：对真实 codex_cli_rs 到 chatgpt.com/backend-api/codex 的 HTTPS 流量抓包。
+var codexWireHeaders = map[string]string{
+	"accept":             "Accept",
+	"content-type":       "content-type",
+	"authorization":      "authorization",
+	"user-agent":         "User-Agent",
+	"version":            "Version",
+	"originator":         "Originator",
+	"chatgpt-account-id": "Chatgpt-Account-Id",
+	"session_id":         "Session_id",
+	"conversation_id":    "Conversation_id",
+	"connection":         "Connection",
+	// Stainless SDK headers（保持 SDK 原始大小写）
+	"x-stainless-package-version": "X-Stainless-Package-Version",
+	"x-stainless-runtime-version": "X-Stainless-Runtime-Version",
+	"x-stainless-os":              "X-Stainless-Os",
+	"x-stainless-arch":            "X-Stainless-Arch",
+}
+
+// setWireHeader 以精确的 wire casing 设置请求头，绕过 Go 的 canonical 规范化。
+// 先删除所有可能存在的 canonical/wire/raw 形式，再以指定 key 写入。
+func setWireHeader(h http.Header, key, value string) {
+	// 删除 Go canonical 形式（如 "Authorization"）
+	h.Del(key)
+	// 删除 wire casing 形式（如 "authorization"）
+	if wk, ok := codexWireHeaders[strings.ToLower(key)]; ok && wk != key {
+		delete(h, wk)
+	}
+	// 删除原始 key（防止重复）
+	delete(h, key)
+	// 以精确 wire casing 写入
+	h[key] = []string{value}
+}
+
+// resolveWireKey 将任意 key 映射为 Codex CLI wire casing。
+// 如果 map 中没有对应条目，返回原始 key。
+func resolveWireKey(key string) string {
+	if wk, ok := codexWireHeaders[strings.ToLower(key)]; ok {
+		return wk
+	}
+	return key
+}
+
 func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) {
 	if req == nil {
 		return
@@ -307,33 +352,44 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 		account.Mu().RUnlock()
 	}
 
-	var profile deviceProfile
-	version := ""
-	if IsDeviceProfileStabilizationEnabled(deviceCfg) {
-		profile = ResolveDeviceProfile(account, apiKey, downstreamHeaders, deviceCfg)
-		ApplyDeviceProfileHeaders(req, profile)
-		version = codexVersionFromProfile(profile, strings.TrimSpace(deviceCfg.PackageVersion))
-	} else {
-		clientProfile := ProfileForAccount(account.ID())
-		req.Header.Set("User-Agent", clientProfile.UserAgent)
-		version = clientProfile.Version
+	// 先清空所有已有 header，从头构建（确保顺序和大小写完全受控）
+	req.Header = make(http.Header)
+
+	identity := ResolveUpstreamClientIdentity(account, apiKey, downstreamHeaders, deviceCfg)
+	if identity.UserAgent != "" {
+		req.Header.Set("User-Agent", identity.UserAgent)
+	}
+	if identity.PackageVersion != "" {
+		req.Header.Set("X-Stainless-Package-Version", identity.PackageVersion)
+	}
+	if identity.RuntimeVersion != "" {
+		req.Header.Set("X-Stainless-Runtime-Version", identity.RuntimeVersion)
+	}
+	if identity.OS != "" {
+		req.Header.Set("X-Stainless-Os", identity.OS)
+	}
+	if identity.Arch != "" {
+		req.Header.Set("X-Stainless-Arch", identity.Arch)
 	}
 
+	// ==================== 核心请求头 ====================
+	// 注意：HTTP/2 协议要求 header 名称小写，golang.org/x/net/http2 会自动处理。
+	// 对于 HTTP/1.1 场景，wire casing 由 codexWireHeaders map 定义，可通过 setWireHeader 使用。
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Connection", "Keep-Alive")
-	if version != "" {
-		req.Header.Set("Version", version)
+
+	if identity.Version != "" {
+		req.Header.Set("Version", identity.Version)
 	}
-	if originator := strings.TrimSpace(downstreamHeaders.Get("Originator")); originator != "" {
-		req.Header.Set("Originator", originator)
-	} else {
-		req.Header.Set("Originator", Originator)
-	}
+
+	req.Header.Set("Originator", Originator)
+
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
+
 	if cacheKey != "" {
 		req.Header.Set("Session_id", cacheKey)
 		req.Header.Del("Conversation_id")

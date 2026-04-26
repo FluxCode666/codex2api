@@ -704,6 +704,15 @@
     "defaultName": "default",
     "keyNamePlaceholder": "e.g. Claude Code / Cherry Studio",
     "keyValuePlaceholder": "Leave empty to auto-generate",
+    "poolLabel": "Account Pool",
+    "poolPlaceholder": "Select account pool",
+    "poolHint": "This key only routes to the selected plan type. Choose \"All Accounts\" to disable pool filtering.",
+    "poolColumn": "Pool",
+    "poolAll": "All Accounts",
+    "poolFree": "Free Pool",
+    "poolTeam": "Team Pool",
+    "poolPlus": "Plus Pool",
+    "poolPro": "Pro Pool",
     "createKey": "Create Key",
     "creating": "Creating…",
     "keyCreated": "New key generated",
@@ -815,7 +824,7 @@
     },
     "importAccounts": {
       "title": "Import Accounts (File Upload)",
-      "desc": "Batch import accounts via file upload. Supports three formats: txt (one RT per line), json (CLIProxyAPI credential export compatible), at_txt (one AT per line). Max file size 2MB."
+      "desc": "Batch import accounts via file upload. Supports three formats: txt (one RT per line), json (CLIProxyAPI credential export compatible), at_txt (one AT per line). Max file size 256MB."
     },
     "deleteAccount": {
       "title": "Delete Account",

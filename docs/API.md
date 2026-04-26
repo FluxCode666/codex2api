@@ -604,15 +604,21 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
 
 **请求:**
 - Method: POST
-- Content-Type: multipart/form-data
+- Content-Type: `multipart/form-data` 或直接原始请求体
 
 **Form 字段:**
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| file | file | 是 | 上传文件（最大 2MB，JSON 格式支持多文件） |
+| file | file | 否 | 传统字段名。当前实现对 multipart 文件字段名不做强制限制，只要是文件 part 即可导入；单文件最大 256MB，JSON 格式支持多文件 |
 | format | string | 否 | 文件格式：`txt`（默认）、`json`、`at_txt` |
 | proxy_url | string | 否 | 代理 URL |
+
+**补充说明:**
+
+- 当前实现支持 multipart 任意文件字段名，不强制要求必须叫 `file`
+- 当前实现支持直接用 raw body 上传文件内容，此时通过查询参数 `format` 指定格式最稳妥
+- 导入后会自动去重，并按受控并发刷新新账号，避免一次性导入大量账号时刷新任务失控
 
 **format 格式说明:**
 
@@ -890,7 +896,9 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
     {
       "id": 1,
       "name": "default",
-      "key": "sk-xxxxxxxxxxxxxxxxxxxxxxxx",
+      "key": "sk-d****...****abcd",
+      "raw_key": "sk-xxxxxxxxxxxxxxxxxxxxxxxx",
+      "pool_plan_type": "plus",
       "created_at": "2024-01-01T00:00:00Z"
     }
   ]
@@ -905,16 +913,25 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 ```json
 {
   "name": "production",
-  "key": "sk-custom-key"  // 可选，不填则自动生成
+  "key": "sk-custom-key",
+  "pool_plan_type": "plus"
 }
 ```
+
+说明：
+
+- `key` 可选，不填则自动生成
+- `pool_plan_type` 可选，支持 `all`、`free`、`team`、`plus`、`pro`
+- 省略、空字符串或 `all` 表示该 key 不限制账号池
+- `pool_plan_type` 只控制“套餐池路由”，不会替代 `allowed_api_key_ids` 的细粒度限制
 
 **响应:**
 ```json
 {
   "id": 2,
   "key": "sk-xxxxxxxxxxxxxxxxxxxxxxxx",
-  "name": "production"
+  "name": "production",
+  "pool_plan_type": "plus"
 }
 ```
 

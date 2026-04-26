@@ -704,6 +704,15 @@
     "defaultName": "default",
     "keyNamePlaceholder": "例如 Claude Code / Cherry Studio",
     "keyValuePlaceholder": "留空则自动生成",
+    "poolLabel": "账号池",
+    "poolPlaceholder": "选择账号池",
+    "poolHint": "这个密钥只会路由到所选套餐类型的账号；选择“全部账号”则不限制。",
+    "poolColumn": "账号池",
+    "poolAll": "全部账号",
+    "poolFree": "Free 池",
+    "poolTeam": "Team 池",
+    "poolPlus": "Plus 池",
+    "poolPro": "Pro 池",
     "createKey": "创建密钥",
     "creating": "创建中…",
     "keyCreated": "新密钥已生成",
@@ -815,7 +824,7 @@
     },
     "importAccounts": {
       "title": "Import Accounts (File Upload)",
-      "desc": "通过文件上传批量导入账号。支持三种格式：txt（每行一个 RT）、json（兼容 CLIProxyAPI 凭证导出）、at_txt（每行一个 AT）。文件大小限制 2MB。"
+      "desc": "通过文件上传批量导入账号。支持三种格式：txt（每行一个 RT）、json（兼容 CLIProxyAPI 凭证导出）、at_txt（每行一个 AT）。文件大小限制 256MB。"
     },
     "deleteAccount": {
       "title": "Delete Account",

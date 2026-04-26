@@ -182,10 +182,10 @@ export const api = {
     return request<{ trend: AccountEventTrendPoint[] }>(`/accounts/event-trend?${sp.toString()}`)
   },
   getAPIKeys: () => request<APIKeysResponse>('/keys'),
-  createAPIKey: (name: string, key?: string) =>
+  createAPIKey: (name: string, key?: string, poolPlanType?: string) =>
     request<CreateAPIKeyResponse>('/keys', {
       method: 'POST',
-      body: JSON.stringify({ name, ...(key ? { key } : {}) }),
+      body: JSON.stringify({ name, ...(key ? { key } : {}), ...(poolPlanType ? { pool_plan_type: poolPlanType } : {}) }),
     }),
   deleteAPIKey: (id: number) =>
     request<MessageResponse>(`/keys/${id}`, { method: 'DELETE' }),

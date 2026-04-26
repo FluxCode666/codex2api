@@ -2,7 +2,6 @@ import { type PropsWithChildren, type ReactNode, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { LayoutDashboard, Users, Activity, Settings, Server, Workflow, Sun, Moon, Languages, Globe, BookOpen, FileCode2, KeyRound } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import logoImg from '../assets/logo.png'
 import { useTheme } from '../hooks/useTheme'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 
@@ -25,6 +24,8 @@ const navDefs: NavDef[] = [
   { to: '/docs', labelKey: 'nav2.docs', icon: <BookOpen className="size-[18px]" /> },
   { to: '/api-reference', labelKey: 'nav2.apiRef', icon: <FileCode2 className="size-[18px]" /> },
 ]
+
+const logoImg = `${import.meta.env.BASE_URL}favicon.png`
 
 export default function Layout({ children }: PropsWithChildren) {
   const { theme, toggle } = useTheme()

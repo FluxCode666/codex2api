@@ -25,6 +25,15 @@ const (
 	MaxRetries    = 3
 )
 
+// ApplyOpenAIAuthHeaders 统一设置发往 OpenAI 认证上游的请求头。
+func ApplyOpenAIAuthHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", OpenAICodexCLIUserAgent)
+}
+
 // ResinRequestDecorator 由外部（main.go）注入，用于在 Resin 启用时改写请求 URL 和添加 Header。
 // 避免 auth → proxy 循环依赖。参数: (originalURL, accountIdentifier) → (newURL)
 // 调用方需在返回的 req 上设置 X-Resin-Account header。
@@ -71,7 +80,7 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 		return nil, nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
+	ApplyOpenAIAuthHeaders(req)
 
 	// Resin 反代：注入账号身份头
 	if ResinRequestDecorator != nil && accountID != "" {
@@ -271,8 +280,8 @@ func ParseAccessToken(accessToken string) *AccessTokenInfo {
 	}
 
 	var claims struct {
-		Exp            int64 `json:"exp"`
-		OpenAIAuth    *struct {
+		Exp        int64 `json:"exp"`
+		OpenAIAuth *struct {
 			ChatGPTAccountID string `json:"chatgpt_account_id"`
 			PlanType         string `json:"chatgpt_plan_type"`
 		} `json:"https://api.openai.com/auth"`
@@ -311,7 +320,7 @@ func (e *authPoolEntry) touch() {
 }
 
 const (
-	authClientPoolTTL         = 5 * time.Minute
+	authClientPoolTTL             = 5 * time.Minute
 	authClientPoolCleanupInterval = 60 * time.Second
 )
 
@@ -384,8 +393,6 @@ func buildHTTPClient(proxyURL string) *http.Client {
 	}
 	return client
 }
-
-
 
 // BuildHTTPClient builds a proxy-aware HTTP client (exported for admin OAuth flow).
 func BuildHTTPClient(proxyURL string) *http.Client {

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -52,9 +53,10 @@ type Handler struct {
 	chartCacheData map[string]*chartCacheEntry
 
 	// 账号请求统计缓存（30秒 TTL）
-	reqCountMu        sync.RWMutex
-	reqCountCache     map[int64]*database.AccountRequestCount
-	reqCountExpiresAt time.Time
+	reqCountMu         sync.RWMutex
+	reqCountCache      map[int64]*database.AccountRequestCount
+	reqCountExpiresAt  time.Time
+	importRefreshQueue chan int64
 }
 
 type chartCacheEntry struct {
@@ -62,24 +64,184 @@ type chartCacheEntry struct {
 	expiresAt time.Time
 }
 
+const (
+	maxImportFileSizeBytes  = 256 * 1024 * 1024
+	importRefreshWorkers    = 8
+	importRefreshQueueSize  = 10000
+	importTextFieldMaxBytes = 1 * 1024 * 1024
+)
+
+var errImportFileMissing = errors.New("import file missing")
+
 // NewHandler 创建管理后台处理器
 func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *proxy.RateLimiter, adminSecretEnv string) *Handler {
 	handler := &Handler{
-		store:          store,
-		cache:          tc,
-		db:             db,
-		rateLimiter:    rl,
-		cpuSampler:     newCPUSampler(),
-		startedAt:      time.Now(),
-		databaseDriver: db.Driver(),
-		databaseLabel:  db.Label(),
-		cacheDriver:    tc.Driver(),
-		cacheLabel:     tc.Label(),
-		adminSecretEnv: adminSecretEnv,
-		chartCacheData: make(map[string]*chartCacheEntry),
+		store:              store,
+		cache:              tc,
+		db:                 db,
+		rateLimiter:        rl,
+		cpuSampler:         newCPUSampler(),
+		startedAt:          time.Now(),
+		databaseDriver:     db.Driver(),
+		databaseLabel:      db.Label(),
+		cacheDriver:        tc.Driver(),
+		cacheLabel:         tc.Label(),
+		adminSecretEnv:     adminSecretEnv,
+		chartCacheData:     make(map[string]*chartCacheEntry),
+		importRefreshQueue: make(chan int64, importRefreshQueueSize),
 	}
 	handler.refreshAccount = handler.refreshSingleAccount
+	handler.startImportRefreshWorkers()
 	return handler
+}
+
+func (h *Handler) startImportRefreshWorkers() {
+	if h.store == nil || h.importRefreshQueue == nil {
+		return
+	}
+	for range importRefreshWorkers {
+		go func() {
+			for accountID := range h.importRefreshQueue {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
+					log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
+				} else {
+					log.Printf("导入账号 %d 刷新成功", accountID)
+				}
+				cancel()
+			}
+		}()
+	}
+}
+
+func maxImportFileSizeLabel() string {
+	return fmt.Sprintf("%dMB", maxImportFileSizeBytes/(1024*1024))
+}
+
+func (h *Handler) enqueueImportedAccountRefresh(accountID int64) {
+	if h.store == nil {
+		return
+	}
+	if h.importRefreshQueue == nil {
+		go func() {
+			refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
+				log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
+			} else {
+				log.Printf("导入账号 %d 刷新成功", accountID)
+			}
+		}()
+		return
+	}
+	h.importRefreshQueue <- accountID
+}
+
+type importUpload struct {
+	filename string
+	data     []byte
+}
+
+type importRequest struct {
+	format   string
+	proxyURL string
+	uploads  []importUpload
+}
+
+func inferImportFormat(contentType string) string {
+	if strings.Contains(strings.ToLower(contentType), "json") {
+		return "json"
+	}
+	return "txt"
+}
+
+func parseImportRequest(c *gin.Context) (*importRequest, error) {
+	req := &importRequest{
+		format:   inferImportFormat(c.ContentType()),
+		proxyURL: strings.TrimSpace(c.Query("proxy_url")),
+	}
+	if format := strings.TrimSpace(c.Query("format")); format != "" {
+		req.format = format
+	}
+
+	if strings.HasPrefix(strings.ToLower(c.ContentType()), "multipart/form-data") {
+		return parseMultipartImportRequest(c, req)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(c.Request.Body, maxImportFileSizeBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxImportFileSizeBytes {
+		return nil, fmt.Errorf("文件大小不能超过 %s", maxImportFileSizeLabel())
+	}
+	if len(bytes.TrimSpace(trimUTF8BOM(data))) == 0 {
+		return nil, errImportFileMissing
+	}
+	req.uploads = []importUpload{{
+		filename: "request-body",
+		data:     data,
+	}}
+	return req, nil
+}
+
+func parseMultipartImportRequest(c *gin.Context, req *importRequest) (*importRequest, error) {
+	reader, err := c.Request.MultipartReader()
+	if err != nil {
+		return nil, err
+	}
+
+	uploads := make([]importUpload, 0)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		formName := part.FormName()
+		filename := part.FileName()
+		if filename == "" {
+			value, readErr := io.ReadAll(io.LimitReader(part, importTextFieldMaxBytes+1))
+			_ = part.Close()
+			if readErr != nil {
+				return nil, readErr
+			}
+			if len(value) > importTextFieldMaxBytes {
+				return nil, fmt.Errorf("表单字段 %s 过大", formName)
+			}
+			switch formName {
+			case "format":
+				if trimmed := strings.TrimSpace(string(value)); trimmed != "" {
+					req.format = trimmed
+				}
+			case "proxy_url":
+				req.proxyURL = strings.TrimSpace(string(value))
+			}
+			continue
+		}
+
+		data, readErr := io.ReadAll(io.LimitReader(part, maxImportFileSizeBytes+1))
+		_ = part.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("读取文件 %s 失败", filename)
+		}
+		if len(data) > maxImportFileSizeBytes {
+			return nil, fmt.Errorf("文件 %s 大小超过 %s", filename, maxImportFileSizeLabel())
+		}
+		uploads = append(uploads, importUpload{
+			filename: filename,
+			data:     data,
+		})
+	}
+
+	if len(uploads) == 0 {
+		return nil, errImportFileMissing
+	}
+	req.uploads = uploads
+	return req, nil
 }
 
 // SetPoolSizes 设置连接池大小跟踪值（由 main.go 在启动时调用）
@@ -761,6 +923,8 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		// 热加载：直接加入内存池
 		newAcc := &auth.Account{
 			DBID:         id,
+			Platform:     auth.PlatformOpenAI,
+			Type:         auth.AccountTypeOAuth,
 			RefreshToken: rt,
 			ProxyURL:     req.ProxyURL,
 		}
@@ -881,6 +1045,8 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		// 热加载到内存池（AT-only，无 RT）
 		newAcc := &auth.Account{
 			DBID:        id,
+			Platform:    auth.PlatformOpenAI,
+			Type:        auth.AccountTypeAccessToken,
 			AccessToken: at,
 			ExpiresAt:   time.Now().Add(1 * time.Hour),
 			ProxyURL:    req.ProxyURL,
@@ -1040,49 +1206,39 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 
 // ImportAccounts 批量导入账号（支持 TXT / JSON）
 func (h *Handler) ImportAccounts(c *gin.Context) {
-	format := c.DefaultPostForm("format", "txt")
-	proxyURL := c.PostForm("proxy_url")
+	req, err := parseImportRequest(c)
+	if err != nil {
+		if errors.Is(err, errImportFileMissing) {
+			writeError(c, http.StatusBadRequest, "请上传文件，或直接提交文本/JSON 请求体")
+			return
+		}
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	switch format {
+	switch req.format {
 	case "json":
-		h.importAccountsJSON(c, proxyURL)
+		h.importAccountsJSON(c, req.uploads, req.proxyURL)
 	case "at_txt":
-		h.importAccountsATTXT(c, proxyURL)
+		h.importAccountsATTXT(c, req.uploads, req.proxyURL)
 	default:
-		h.importAccountsTXT(c, proxyURL)
+		h.importAccountsTXT(c, req.uploads, req.proxyURL)
 	}
 }
 
 // importAccountsTXT 通过 TXT 文件导入（每行一个 RT）
-func (h *Handler) importAccountsTXT(c *gin.Context, proxyURL string) {
-	file, header, err := c.Request.FormFile("file")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "请上传文件（字段名: file）")
-		return
-	}
-	defer file.Close()
-
-	if header.Size > 2*1024*1024 {
-		writeError(c, http.StatusBadRequest, "文件大小不能超过 2MB")
-		return
-	}
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "读取文件失败")
-		return
-	}
-
-	// 按行分割，去重
-	lines := strings.Split(string(data), "\n")
+func (h *Handler) importAccountsTXT(c *gin.Context, uploads []importUpload, proxyURL string) {
 	seen := make(map[string]bool)
 	var tokens []importToken
-	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		t = strings.TrimPrefix(t, "\xef\xbb\xbf") // 去除 UTF-8 BOM
-		if t != "" && !seen[t] {
-			seen[t] = true
-			tokens = append(tokens, importToken{refreshToken: t})
+	for _, upload := range uploads {
+		lines := strings.Split(string(upload.data), "\n")
+		for _, line := range lines {
+			t := strings.TrimSpace(line)
+			t = strings.TrimPrefix(t, "\xef\xbb\xbf") // 去除 UTF-8 BOM
+			if t != "" && !seen[t] {
+				seen[t] = true
+				tokens = append(tokens, importToken{refreshToken: t})
+			}
 		}
 	}
 
@@ -1095,41 +1251,13 @@ func (h *Handler) importAccountsTXT(c *gin.Context, proxyURL string) {
 }
 
 // importAccountsJSON 通过 JSON 文件导入（兼容 CLIProxyAPI 凭证格式）
-func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string) {
-	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
-		writeError(c, http.StatusBadRequest, "解析表单失败")
-		return
-	}
-
-	files := c.Request.MultipartForm.File["file"]
-	if len(files) == 0 {
-		writeError(c, http.StatusBadRequest, "请上传至少一个 JSON 文件")
-		return
-	}
-
+func (h *Handler) importAccountsJSON(c *gin.Context, uploads []importUpload, proxyURL string) {
 	var allTokens []importToken
 
-	for _, fh := range files {
-		if fh.Size > 2*1024*1024 {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("文件 %s 大小超过 2MB", fh.Filename))
-			return
-		}
-
-		f, err := fh.Open()
+	for _, upload := range uploads {
+		tokens, err := parseImportJSONTokens(upload.data)
 		if err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("打开文件 %s 失败", fh.Filename))
-			return
-		}
-		data, err := io.ReadAll(f)
-		f.Close()
-		if err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("读取文件 %s 失败", fh.Filename))
-			return
-		}
-
-		tokens, err := parseImportJSONTokens(data)
-		if err != nil {
-			writeError(c, http.StatusBadRequest, fmt.Sprintf("文件 %s 不是有效的 JSON 格式", fh.Filename))
+			writeError(c, http.StatusBadRequest, fmt.Sprintf("文件 %s 不是有效的 JSON 格式", upload.filename))
 			return
 		}
 
@@ -1307,6 +1435,8 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				atInfo := auth.ParseAccessToken(tok.accessToken)
 				newAcc := &auth.Account{
 					DBID:        id,
+					Platform:    auth.PlatformOpenAI,
+					Type:        auth.AccountTypeAccessToken,
 					AccessToken: tok.accessToken,
 					ExpiresAt:   time.Now().Add(1 * time.Hour),
 					ProxyURL:    proxyURL,
@@ -1351,21 +1481,15 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 				newAcc := &auth.Account{
 					DBID:         id,
+					Platform:     auth.PlatformOpenAI,
+					Type:         auth.AccountTypeOAuth,
 					RefreshToken: tok.refreshToken,
 					ProxyURL:     proxyURL,
 				}
 				h.store.AddAccount(newAcc)
 
-				// 后台异步刷新，不阻塞导入流程
-				go func(accountID int64) {
-					refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
-						log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
-					} else {
-						log.Printf("导入账号 %d 刷新成功", accountID)
-					}
-				}(id)
+				// 导入成功后排队刷新，避免大批量导入时瞬间打爆本地和上游。
+				h.enqueueImportedAccountRefresh(id)
 			}
 		}(i, t)
 	}
@@ -1385,35 +1509,18 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 }
 
 // importAccountsATTXT 通过 TXT 文件导入 AT-only 账号（每行一个 Access Token）
-func (h *Handler) importAccountsATTXT(c *gin.Context, proxyURL string) {
-	file, header, err := c.Request.FormFile("file")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "请上传文件（字段名: file）")
-		return
-	}
-	defer file.Close()
-
-	if header.Size > 2*1024*1024 {
-		writeError(c, http.StatusBadRequest, "文件大小不能超过 2MB")
-		return
-	}
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, "读取文件失败")
-		return
-	}
-
-	// 按行分割，文件内去重
-	lines := strings.Split(string(data), "\n")
+func (h *Handler) importAccountsATTXT(c *gin.Context, uploads []importUpload, proxyURL string) {
 	seen := make(map[string]bool)
 	var atTokens []string
-	for _, line := range lines {
-		t := strings.TrimSpace(line)
-		t = strings.TrimPrefix(t, "\xef\xbb\xbf")
-		if t != "" && !seen[t] {
-			seen[t] = true
-			atTokens = append(atTokens, t)
+	for _, upload := range uploads {
+		lines := strings.Split(string(upload.data), "\n")
+		for _, line := range lines {
+			t := strings.TrimSpace(line)
+			t = strings.TrimPrefix(t, "\xef\xbb\xbf")
+			if t != "" && !seen[t] {
+				seen[t] = true
+				atTokens = append(atTokens, t)
+			}
 		}
 	}
 
@@ -1512,6 +1619,8 @@ func (h *Handler) importAccountsATTXT(c *gin.Context, proxyURL string) {
 
 			newAcc := &auth.Account{
 				DBID:        id,
+				Platform:    auth.PlatformOpenAI,
+				Type:        auth.AccountTypeAccessToken,
 				AccessToken: accessToken,
 				ExpiresAt:   time.Now().Add(1 * time.Hour),
 				ProxyURL:    proxyURL,
@@ -1932,8 +2041,20 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 }
 
 type createKeyReq struct {
-	Name string `json:"name"`
-	Key  string `json:"key"`
+	Name         string `json:"name"`
+	Key          string `json:"key"`
+	PoolPlanType string `json:"pool_plan_type"`
+}
+
+func normalizeAPIKeyPoolPlanType(plan string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "", "all":
+		return "", true
+	case "free", "team", "plus", "pro":
+		return strings.ToLower(strings.TrimSpace(plan)), true
+	default:
+		return "", false
+	}
 }
 
 // generateKey 生成随机 API Key
@@ -1968,6 +2089,12 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 		return
 	}
 
+	poolPlanType, ok := normalizeAPIKeyPoolPlanType(req.PoolPlanType)
+	if !ok {
+		writeError(c, http.StatusBadRequest, "pool_plan_type 仅支持 all/free/team/plus/pro")
+		return
+	}
+
 	key := req.Key
 	if key == "" {
 		key = generateKey()
@@ -1983,7 +2110,7 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	id, err := h.db.InsertAPIKey(ctx, req.Name, key)
+	id, err := h.db.InsertAPIKey(ctx, req.Name, key, poolPlanType)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "创建失败: "+err.Error())
 		return
@@ -1993,9 +2120,10 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	security.SecurityAuditLog("API_KEY_CREATED", fmt.Sprintf("id=%d name=%s ip=%s", id, security.SanitizeLog(req.Name), c.ClientIP()))
 
 	c.JSON(http.StatusOK, createAPIKeyResponse{
-		ID:   id,
-		Key:  key,
-		Name: req.Name,
+		ID:           id,
+		Key:          key,
+		Name:         req.Name,
+		PoolPlanType: poolPlanType,
 	})
 }
 

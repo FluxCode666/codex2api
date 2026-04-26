@@ -2,7 +2,7 @@
 package api
 
 // @title Codex2API
-// @version 1.0.0
+// @version 1.0.1-beta2
 // @description OpenAI-compatible API proxy for Codex with enhanced features including multi-account pooling,
 // automatic rotation, usage tracking, and administrative management.
 //
@@ -36,7 +36,7 @@ type SwaggerInfo struct {
 func GetSwaggerInfo() SwaggerInfo {
 	return SwaggerInfo{
 		Title:       "Codex2API",
-		Version:     "1.0.0",
+		Version:     "1.0.1-beta2",
 		Description: "OpenAI-compatible API proxy for Codex",
 		Host:        "localhost:8080",
 		BasePath:    "/v1",

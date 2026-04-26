@@ -378,6 +378,7 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 
 func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
 	apiKeyID := requestAPIKeyID(c)
+	accountFilter := accountFilterForAPIKeyPool(requestAPIKeyPoolPlanType(c))
 	maxRetries := h.getMaxRetries()
 	var lastErr error
 	var lastStatusCode int
@@ -385,9 +386,9 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	excludeAccounts := make(map[int64]bool)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		account, stickyProxyURL := h.nextAccountForSession("", apiKeyID, excludeAccounts)
+		account, stickyProxyURL := h.nextAccountForSessionWithFilter("", apiKeyID, excludeAccounts, accountFilter)
 		if account == nil {
-			account, stickyProxyURL = h.store.WaitForSessionAvailable(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts)
+			account, stickyProxyURL = h.store.WaitForSessionAvailableWithFilter(c.Request.Context(), "", 30*time.Second, apiKeyID, excludeAccounts, accountFilter)
 			if account == nil {
 				if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 					h.sendFinalUpstreamError(c, lastStatusCode, lastBody)
